@@ -251,7 +251,7 @@ annotatePeaks<-function(peaks, gtf, limit=c(-10e3,10e3), remove_unmatched=T, uni
 		peak_df[peakind,]$tss_group<-transr[closest_ref]$tss_group
 		
 		amb_list<-split(transr,transr$tss_group)
-		amb_list<-amb_list[elementLengths(amb_list)>1]
+		amb_list<-amb_list[elementNROWS(amb_list)>1]
 		transr<-transr[which(transr$tss_group %in% names(amb_list) & transr$tss_group %in% peak_df$tss_group)]
 		
 		sob<-sliceNT(unifyBy,transr$transcript_id,gtf,concatenate=T,stranded=T)  

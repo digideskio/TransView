@@ -2,13 +2,13 @@
 useDynLib(TransView)
 
 import(zlibbioc)
+import(S4Vectors)
 importFrom("IRanges",IRanges,RleList)
 importFrom("GenomicRanges",GRanges,GRangesList)
 importFrom("gplots",colorpanel,greenred)
 importMethodsFrom("BiocGenerics",strand)
 importMethodsFrom("IRanges",reduce,unlist,start,end,"start<-","end<-","ranges<-",mid,width,ranges)
 importMethodsFrom("GenomicRanges",as.data.frame,seqnames,names,findOverlaps,nearest)
-importMethodsFrom("S4Vectors",split,mcols,"mcols<-",values,elementLengths,subjectHits,queryHits)
 import(methods)
 import(Rsamtools)
 
