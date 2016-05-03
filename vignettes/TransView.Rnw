@@ -1,0 +1,490 @@
+%\VignetteIndexEntry{An introduction to TransView} 
+%\VignetteKeywords{TransView, read density, short read, I/O, sequencing, transcription} 
+%\VignettePackage{TransView} 
+\documentclass{article}
+
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{times}
+\usepackage{hyperref}
+
+\textwidth=6.5in
+\textheight=8.5in
+%\parskip=.3cm
+\oddsidemargin=-.1in
+\evensidemargin=-.1in
+\headheight=-.3in
+
+
+\newcommand{\Rfunction}[1]{{\texttt{#1}}}
+\newcommand{\Robject}[1]{{\texttt{#1}}}
+\newcommand{\Rpackage}[1]{{\textit{#1}}}
+\newcommand{\Rmethod}[1]{{\texttt{#1}}}
+\newcommand{\Rfunarg}[1]{{\texttt{#1}}}
+\newcommand{\Rclass}[1]{{\textit{#1}}}
+\newcommand{\Rcode}[1]{{\texttt{#1}}}
+\newcommand{\software}[1]{\textsf{#1}}
+\newcommand{\R}{\software{R}}
+\newcommand{\TransView}{\Rpackage{TransView}}
+
+\SweaveOpts{eval=TRUE, keep.source=FALSE}
+
+\title{An Introduction to \TransView{}}
+\author{Julius M\"uller$^\ddagger$\footnote{ju-mu@alumni.ethz.ch}}
+\date{\today}
+
+\begin{document}
+
+\SweaveOpts{concordance=TRUE}
+
+\maketitle
+
+\begin{center}
+$^\ddagger$Institute of Molecular and Cell Biology\\ 
+Singapore
+\end{center}
+
+\tableofcontents
+\newpage
+<<options,echo=FALSE>>=
+options(width=65)
+@
+
+\section{Introduction}
+
+
+
+In modern biology, high-throughput sequencing has become an indispensable tool to understand transcriptional regulation. Numerous sequencing based methods have been developed allowing for an unbiased, genome wide analysis. Techniques like ChIP-Seq and RNA-Seq are routinely used and integrated to study the transcriptional outcome of transcription factor binding. With the large amount of data generated from such experiments however, the processing tools need to be designed with special focus on memory management and algorithm efficiency. 
+
+On the file storage side, the BAM file format \cite{Li09} has become the \emph{de facto} standard container for storing sequencing reads after the alignment. It can contain results and parameters of the alignment, allows for random access and furthermore keeps the file size at a minimum using file compression. In order to do genome wide calculations based on the read densities however, the individual chunks of the BAM file need to be decompressed, making repeated random access fairly slow.
+
+The \TransView{} package provides a mechanism to pre-fetch all reads from a SAM/BAM file into the memory as a genome wide read density map, making it instantly accessible to the user. The SAM/BAM parser is based on the \href{http://samtools.sourceforge.net/samtools/masterTOC.html}{Samtools C API} , and the slicing functions are designed for fast random slicing and memory efficient storage. The package provides superior performance to existing methods and the density generation process is highly configurable based on flags stored in SAM/BAM files. It is compatible to paired end data sets, strand specific protocols, variable read lengths and spliced reads. Plotting facilities and accessors for read metrics derived from parsing are provided.
+
+The \TransView{} package is available at bioconductor.org and can be downloaded via \Rfunction{biocLite}:
+
+<<biocLite, eval=FALSE>>=
+ source("http://bioconductor.org/biocLite.R")
+ biocLite("TransView")
+@
+\newpage
+
+\section{Read density map construction and accession}
+
+
+The code to reproduce the examples in the following is partially attached to the package. The ChIP-Seq reads mapped to mm9 and the results from MACS peak calling \cite{Zhang08} are attached. The amount of peaks of the two ChIP-Seq experiments has been reduced to 21, 500Bp long peak regions. A matching GTF file from UCSC is attached as well to demonstrate the annotation facilities. Due to space limitations the RNA-Seq visualisation is based on the bam files from the \Rpackage{pasillaBamSubset} data set and is therefore required to be loaded from bioconductor. A matching dm3 GTF file is included in TransView.
+
+<<load_files, echo=TRUE>>=
+library("TransView")
+library("GenomicRanges")
+library("pasillaBamSubset")
+
+fn.chipseq.bam<-dir(system.file("extdata", package="TransView"),full=T,patt="bam$")
+fn.macs<-dir(system.file("extdata", package="TransView"),full=T,patt="xls$")
+fn.dm3.gtf<-dir(system.file("extdata", package="TransView"),full=T,patt="gtf.gz$")[1]
+fn.mm9.gtf<-dir(system.file("extdata", package="TransView"),full=T,patt="gtf.gz$")[2]
+fn.pas_paired<-untreated1_chr4()
+fn.pas_upaired<-untreated3_chr4()
+
+@
+
+\subsection{Creating and accessing the DensityContainer class}
+
+
+To create the read density map, the central function \Rfunction{parseReads} has to be called. The function takes \Rfunarg{filename} as an argument and returns a \Robject{DensityContainer} object.
+
+<<generate_map_1, echo=TRUE>>=
+dens.ind<-parseReads(fn.chipseq.bam[2],verbose=0,description="Induced")
+dens.wt<-parseReads(fn.chipseq.bam[1],verbose=0,description="Basal")
+@
+
+During parsing, with \Rfunarg{verbose} set to 1 the currently processed chromosome will be displayed and a warning will be issued, stating the chromosomes that were found in the SAM/BAM header, but missing in the file body. Accessing the object is fairly simple using the corresponding getter methods. A brief overview will be plotted by calling the show method:
+
+<<bamshow_1, echo=TRUE>>=
+dens.ind
+@
+
+The meaning of the available slots which can all be directly accessed with the corresponding method, are sub divided into 3 sections:
+
+\begin{enumerate}
+  \item{Basic information}
+     \begin{description} 
+       \item[ex\_name]{A user provided string to define a name of this data set}
+       \item[origin]{File name of the source file}
+       \item[spliced]{Should the class be treated like an RNA-Seq experiment for e.g. plotTV?}
+       \item[paired]{Did the source file contain reads with proper pairs?} 
+       \item[readthrough\_pairs]{Determines if the pairs were used from start to end or if individually.}
+       \item[filtered]{Is there a range filter in place? If yes, slicing should be only conducted using the same filter}
+       \item[strands]{Which strands were parsed. Can be "+", "-" or "both"}
+       \item[size]{The current memory occupied by the whole object including the read density maps.}
+     \end{description}
+
+  \item{Reads before filtering}
+    \begin{description} 
+      \item[nreads]{Total number of reads in the file, regardless of mapping state}
+      \item[gcoverage]{Total gcoverage computed by total map mass/(chromosome end - chromosome start). Chromosome length derived from the SAM/BAM header}
+      \item[maxScore]{Maximum read pileup found in file}
+      \item[lowqual]{Amount of reads that did not pass the quality score set by min\_quality or were not mapped}
+      \item[paired\_reads]{Amount of reads having multiple segments in sequencing}
+      \item[proper\_pairs]{Amount of pairs with each segment properly aligned according to the aligner}
+      \item[collapsed]{If \Rfunarg{maxDups} of \Rfunction{parseReads} is in place, the reads at the same position and strand exceeding this value will be counted here.}
+     \end{description}
+     
+  \item{Reads after filtering}
+    \begin{description}
+      \item[compression]{Size of a gap triggering an index event}
+      \item[chromosomes]{Character string with the chromosomes with reads used for map construction}
+      \item[filtered\_reads]{Amount of reads after filtering}
+      \item[pos]{Reads used from the forward strand}
+      \item[neg]{Reads used from the reverse strand}
+      \item[lcoverage]{Local coverage which is computed by filtered map mass/covered region}
+      \item[lmaxScore]{Maximum score of the density maps}
+      \item[fmapmass]{Map mass after quality filtering}
+    \end{description}
+\end{enumerate}
+
+
+All these slots can also be accessed by the function \Rfunction{tvStats} which returns a list with these values and the corresponding names of the slots.
+
+<<generate_map_1, echo=TRUE>>=
+tvs<-tvStats(dens.ind)
+tvs$nreads
+@
+
+Furthermore a histogram of mean read densities of windows across the read densities is computed during parsing. The window size can be changed by the \Rfunarg{hwindow} argument to \Rfunction{parseReads} and the histogram can be retrieved by calling the method \Rfunction{histogram}
+
+
+<<generate_hist, echo=TRUE>>=
+dens.ind.hist<-histogram(dens.ind)
+dens.wt.hist<-histogram(dens.wt)
+@
+
+\begin{figure}[!hb] 
+\begin{center}
+<<label=barplot1, fig=TRUE, echo=TRUE,width=8, height=4,include=TRUE,resolution=150,pdf=F,png=T>>=
+barplot(rbind(dens.ind.hist[1:50]+1,dens.wt.hist[1:50]+1),xlab="Read count",ylab="Positions",col=c("blue","red"),beside=T,legend.text=c("Induced","Basal"),log="y",args.legend=list(x = "topright"))
+@
+\end{center}
+\caption{Bar plot showing the read density distribution in the data set}
+\label{fig:one}
+\end{figure}
+
+
+\subsection{Parsing details and filtering}
+
+
+\Rfunction{parseReads} determines the read length including insertions, matches and any soft clipping as specified in the CIGAR string for each read. The parsing process can be customized by several options as stated in the help file. 
+
+All read density maps are stored in an indexed vector per chromosome. During parsing the overlapping reads will be stored uncompressed to keep accession speed at a maximum. If continuous score maps are interrupted by gaps which are defined by \Rfunction{compression}, the gaps will be skipped and a linear index will be set. The higher this value will be, the lower the amount of indexing and therefore the faster the accession speed. A very low value can lead to a very big index and therefore slower accession speeds. Memory usage on the other side can profit significantly and is therefore recommended to leave this value at the default of $1$. The benefit however highly depends on the coverage of the data set. 
+
+As a further effort to keep the memory food print for genome wide maps at a minimum the read pile ups are stored as 16bit integers which means that they can have a maximum value of $65535$. If this value will be exceeded, the pile up will be capped to this value. A warning will be issued. To avoid the capping one possibility is to set quality thresholds such as \Rfunarg{max\_dups} for the maximum amount of reads at the exact same position and re-run the analysis.
+
+If memory availability is an issue, a range filter can be set with the argument \Rfunarg{filter}. As a consequence read map assembly will be restricted to this ranges. This can save a great amount of memory but requires all further slicing operations to be restricted to these ranges only. To demonstrate the filter option, a convenience function called \Rfunction{macs2gr} will be used to load an attached sample MACS run with matching peak regions. In principle however, any data.frame with three columns containing, chromosomes, starts and ends or a corresponding RangedData object would be sufficient.
+
+<<generate_map_2, echo=TRUE>>=
+peaks<-macs2gr(fn.macs,psize=500)
+dens.ind.filt<-parseReads(fn.chipseq.bam[2],verbose=0,description="ChIP",set_filter=peaks[1,])
+
+us<-slice1(dens.ind,chrom=as.character(seqnames(peaks[1])),start=start(peaks[1]),end=end(peaks[1]))
+rs<-slice1(dens.ind.filt,chrom=as.character(seqnames(peaks[1])),start=start(peaks[1]),end=end(peaks[1]))
+all(us==rs)
+size(dens.ind.filt)
+size(dens.ind)
+@
+
+Do note that range filtering is applied \textbf{after} the density map generation, and therefore any overlapping reads are included in the region. In the example above the memory advantage is small. With real data however, it can make a difference as large as one gigabyte for a mammalian genome. For efficient repeated queries \Rfunction{sliceN} returns a list of numeric vectors with the peak names as names.
+
+<<sliceN, echo=TRUE>>=
+slices.ind<-sliceN(dens.ind,ranges=peaks)
+slices.wt<-sliceN(dens.wt,ranges=peaks)
+@
+
+All \Rfunction{slice} methods also provide an option to handle background reads. These can be either subtracted after correction for total reads in the data set or a fold change can be calculated and is returned on $log2$ scale. 
+
+<<slice_2, echo=TRUE, eval=FALSE>>=
+slices.nobckgd<-sliceN(dens.ind,control=dens.wt,ranges=peaks,treads_norm=F)
+plot(slices.ind[[1]],ylab="Total reads")
+lines(slices.wt[[1]],type="p",col=4)
+lines(slices.nobckgd[[1]],type="p",col=2)
+legend(400,150,c("Induced","Basal","Induced corrected"),col=c(1,4,2),pch="o",bty="n")
+slices.nobckgd.fc<-sliceN(dens.ind,ranges=peaks,control=dens.wt,input_method="/",treads_norm=F)
+summary(slices.nobckgd.fc[[1]])
+@
+
+Total read correction was turned off in this example, since the example regions were selected for demonstration purposes and do not reflect the total amount of reads.
+
+Data from spliced data sets such as RNA-Seq data can be parsed analogous to ungapped reads.
+
+<<generate_map_4, echo=TRUE>>=
+dens.pas_upaired<-parseReads(fn.pas_upaired,spliced=T,verbose=0,description="Unpaired")
+dens.pas_paired<-parseReads(fn.pas_paired,spliced=T,verbose=0,description="Paired")
+@
+
+The argument \Rfunarg{spliced} has no influence on the resulting density map and will only be important for plotting and annotation with \Rfunction{plotTV} and all CIGAR operations are used by default. One exception are paired end reads however, if parsed with the \Rfunarg{read\_through} argument set the CIGAR string will be ignored and densities will be calculated from the beginning of the left to the end of the right read.
+
+
+\subsection{Read map accession}
+
+
+Density maps generated by \Rfunction{parseReads} can only be accessed with one of the included slicing methods such as \Rfunction{slice1} or \Rfunction{slice1T}. The latter reconstructs the original transcript structure typically of a RNA-Seq data set. The transcript strucure information will be taken from a data.frame or \Rclass{GRanges} object witch one row per exon. A data frame should have four columns with chromosomes, starts, ends and strands as well as a fifth column with the transcript\_id of the associated transcript. Alternatively a GTF file can be provided and converted to a GenomicRanges object using the function \Rfunction{gtf2gr}.
+
+<<GTF, echo=TRUE,eval=T>>=
+gtf.mm9<-gtf2gr(fn.mm9.gtf)
+gtf.dm3<-gtf2gr(fn.dm3.gtf)
+head(gtf.mm9)
+@
+
+\Rfunction{gtf2gr} efficiently parses the GTF formats used by ENSEMBL (\href{http://www.ensembl.org/info/data/ftp/index.html}{ensembl.org/info/data/ftp}) and UCSC (e.g. the UCSC table browser) and can be used as a whole genome transcript library. This information can also be provided to \Rfunction{parseReads} as a filter if memory space is limited and subsequent slice operations are limited to these transcripts only. 
+
+<<spliced_1, echo=TRUE>>=
+dens.pas_paired.filt<-parseReads(fn.pas_paired,spliced=T,verbose=0,description="RNA-Seq",set_filter=gtf.dm3)
+size(dens.pas_paired)/size(dens.pas_paired.filt)
+@
+
+Despite of the limited amount of reads in the demo data set, the size advantage of the filtered parsing is here already about factor 2. Slice operations can now be performed using \Rfunction{slice1T} for single queries or \Rfunction{sliceNT} for multiple.
+
+<<spliced_2, echo=TRUE>>=
+slices.exprs.pangolin<-slice1T(dens.pas_paired.filt,"NM_001014685",gtf.dm3,stranded=T,concatenate=F)
+
+pangolin.exon.12<-slices.exprs.pangolin[["NM_001014685.12"]]
+
+pangolin.exon.12
+@
+
+By default, an integer vector with the read densities will be returned. If the precise transcript structure is required, \Rfunction{concatenate} can be switched off and with \Rfunction{stranded} set to \Rcode{FALSE} all read maps on the reverse strand will be reversed so that all returned read maps are store from $5$ prime to $3$ prime. Also here a control experiment can be provided for background handling. Analogous to \Rfunction{sliceN}, there is also an optimized version for multiple queries called \Rfunction{sliceNT} that takes a character vector of identifiers and returns a list with all requested transcript structures.
+
+<<spliced_3, echo=TRUE,keep.source=TRUE>>=
+#Just for demonstration all refseq ids are taken, not recommended for a full sized GTF!
+all_ids<-unique(mcols(gtf.dm3)$transcript_id)
+
+slices.exprs<-sliceNT(dens.pas_paired,all_ids,gtf.dm3,stranded=T,concatenate=F)
+
+pangolin.all.exon.12<-slices.exprs[["NM_001014685.12"]]
+
+all(pangolin.exon.12,pangolin.all.exon.12)
+@
+
+In order to associate ChIP-Seq peaks to the next transcriptional start side (TSS), an annotation step is required. This can be done with several available bioconductor packages. However also \TransView  contains such a convenience function called \Rfunction{annotatePeaks}.  
+
+<<spliced_4, echo=TRUE>>=
+peaks.anno<-annotatePeaks(peaks=peaks,gtf=gtf.mm9,limit=2e3)
+@
+
+\Rfunction{annotatePeaks} will use the digested gtf file to find the TSS of the next transcript to the peak center. The resulting \Rclass{GRanges} object will contain an updated or added meta data column with the associated transcript identifier. If multiple transcripts are found using the same TSS, the first transcript will be used arbitrarily. Optionally a reference RNA-Seq data set can be provided to resolve the ambiguous TSS associations based on a function. By default the transcript will be selected having the largest amount of reads over the length of the transcript.
+
+Additionally it might be of interest to slice or visualize the promoter region of the transcript associated to the peak rather than the peak region itself. This can be achieved by the function \Rfunction{peak2tss} which takes the digested gtf as well as a character vector of matching IDs as an argument.
+
+<<spliced_5, echo=TRUE>>=
+peaks.tss<-peak2tss(peaks.anno, gtf.mm9,peak_len=1000)
+@
+
+\newpage
+\section{Plotting read density maps}
+
+
+To get a visual impression about the outcome of ChIP-Seq experiments or the correlation to expression data, it is often desirable to visualize the whole data set. This can be done by using false color plots centering on genomic features such as enhancers or the TSS or on the peak itself. \TransView  contains the flexible \Rfunction{plotTV} function that can perform plotting of peak profile plots optionally along with results from RNA-Seq, micro arrays or any other matching experiment. All plots will be generated using the \Rfunction{image} function, however scaling and clustering can be highly customized. As the attached demo data is very small to keep the overall package size low, only a limited functionality can be shown here. The package however is designed to efficiently display hundreds to thousands of peaks along with expression data from the corresponding genes.
+
+\subsection{Peak profile plots}
+
+In order to plot a simple overview of the read density distribution in a heat map like manner Fig\ref{fig:2a}, only two input objects are needed: an object of class \Rclass{DensityContainer} which is generated by \Rfunction{parseReads} and a \Rclass{GRanges} with the regions of interest from e.g. \Rfunction{macs2gr}. Instead of two plots with experiment and control, also the background subtracted density map can be plotted alone (Fig\ref{fig:2b}).
+
+
+<<label=pTV1,fig=TRUE, echo=FALSE,width=5, height=5,include=FALSE,prefix.string=plotTV,resolution=150,pdf=F,png=T>>=
+ cluster_results<-plotTV(dens.ind,dens.wt,regions=peaks.anno,show_names=T,norm_readc=F,scale="individual",verbose=0,label_size=.9)
+@
+
+<<label=pTV2, fig=TRUE,echo=FALSE,width=4, height=5,include=FALSE,prefix.string=plotTV,resolution=150,pdf=F,png=T>>=
+  cluster_results<-plotTV(dens.ind,regions=peaks.anno,control=c(dens.wt),show_names=F,norm_readc=F,verbose=0,label_size=.9)
+@
+
+\begin{figure}[!htb]
+  \begin{minipage}[b]{.5\textwidth}
+     \centering
+        \includegraphics[width=1\textwidth]{plotTV-pTV1}
+     \subcaption{}\label{fig:2a}
+  \end{minipage}
+  \begin{minipage}[b]{.5\linewidth}
+     \centering
+        \includegraphics[width=.8\textwidth]{plotTV-pTV2}
+     \subcaption{}\label{fig:2b}
+  \end{minipage}
+  \caption{Example of peak profile plots. All plots were generated without total read correction due to the reduced amount of reads in the sample data sets. Figure 2a shows the induced sample along with the basal control. The black line indicates the mid point of the region, which is the MACS peak summit in this case. Note the different scales because \Rfunarg{scaling} was set to ``individual''. Figure 2b shows the same plot with the basal control reads subtracted from the induced sample.}\label{fig:two}
+\end{figure}
+
+Fig\ref{fig:2a} and Fig\ref{fig:2b} have been generated with the following commands:
+
+<<pTV1_c, echo=TRUE,eval=FALSE>>=
+ cluster_results<-plotTV(dens.ind,dens.wt,regions=peaks.anno,show_names=T,norm_readc=F,scale="individual",verbose=0)
+@
+
+<<pTV2_c,echo=TRUE,eval=FALSE>>=
+  cluster_results<-plotTV(dens.ind,regions=peaks.anno,control=c(dens.wt),show_names=F,norm_readc=F,verbose=0)
+@
+
+There are several options to customize the visual appearance, which are explained in the corresponding help file. One of the most important is \Rfunarg{color\_spread}. This argument regulates the saturation levels on both ends. E.g. if set to \Rfunarg{c(0.1, 0.05}, $10$ percent of the highest and $5$ of the lowest read density levels will be displayed as saturated colors, which are red and white by default.
+
+
+\subsection{Transcript profile plots}
+
+In addition to peak profiles designed to visualize ChIP-Seq experiments, \TransView  can also visualize expression based sequencing experiments such as from RNA-Seq. With appropriate scaling and clustering these plots can give a insight into the kind of transcription taking place over the whole gene body. Genes of individual experiments might cluster differentially according to the transcriptional status over the gene body. Although the interpretaion of such clusters might be complex, individual clusters can reveal a visual indication of correlated binding and transcription events such as Polymerase II activity as well as mRNA stability.
+
+As opposed to peaks, transcripts have varying lengths that can not be trivially
+cut to a uniform size. \TransView  therefore linearly interpolates all
+transcripts into \Rfunarg{ex\_windows} amount of points using the
+method specified by \Rfunarg{bin\_method}. Furthermore all density
+profiles on the reverse strand will be reversed, so that all transcripts have their 5 and 3 prime site on the left and the right side of the image respectively Fig\ref{fig:3a}. In addition to transcript profile plots, ordinary heat maps of a matrix can be plotted as well Fig\ref{fig:3b}. Since the functionality of heat map plotting in \TransView is rather limited compared to specialized packages such as \Rpackage{heatmap.2}, plotting heat maps is not intended to be used for stand alone plots but rather in conjunction with peak profile plots.
+<<label=pTV3, fig=TRUE, echo=FALSE,width=4, height=5,include=FALSE,prefix.string=plotTV,resolution=150,pdf=F,png=T>>=
+genes2plot<-unique(mcols(gtf.dm3)$transcript_id)
+cluster_results<-plotTV(dens.pas_paired,dens.pas_upaired,regions=genes2plot,cluster=5,gtf=gtf.dm3,show_names=T,verbose=0,ex_windows=300)
+@
+
+<<tplots_1, echo=FALSE>>=
+ngenes<-length(peaks.anno)
+fake.array<-matrix(rnorm(n=ngenes*8,mean=10,sd=2),nrow=ngenes,ncol=8,dimnames=list(paste(rep("Gene",ngenes),1:ngenes),paste("E",1:8,sep="")))
+@
+
+<<label=pTV4,fig=TRUE, echo=FALSE,width=5, height=5,include=FALSE,prefix.string=plotTV,resolution=150,pdf=F,png=T>>=
+cluster_results<-plotTV(fake.array,regions=peaks.anno,show_names=T,gclust="expression",cluster="hc_sp",label_size=0.7,verbose=0)
+@
+
+\begin{figure}[!htb]
+  \begin{minipage}[b]{.48\textwidth}
+     \centering
+        \includegraphics[width=.8\textwidth]{plotTV-pTV3}
+     \subcaption{}\label{fig:3a}
+  \end{minipage}
+  \begin{minipage}[b]{.48\linewidth}
+     \centering
+        \includegraphics[width=1\textwidth]{plotTV-pTV4}
+     \subcaption{}\label{fig:3b}
+  \end{minipage}
+  \caption{Example of transcript profile plots. In figure 3a, the paired and single end data sets of pasillaBamSubset are plotted. All transcripts found on Chr4 according to the provided GTF were used and k-means clustered according to their z-score. In figure 3b, a randomized sample heat map is shown. The data was passed as a matrix which could contain the results of i.e. micro array experiment. }\label{fig:three}
+\end{figure}
+
+
+Both expression based plots are converted to z-scores with rows of mean zero and standard deviation of one. If multiple transcript profile plots are supplied, z-scores are computed across all experiments. 
+Fig\ref{fig:3a} and Fig\ref{fig:3b} have been generated with the following commands:
+
+<<label=pTV3_c,echo=TRUE,eval=FALSE>>=
+genes2plot<-unique(mcols(gtf.dm3)$transcript_id)
+cluster_results<-plotTV(dens.pas_paired,dens.pas_upaired,regions=genes2plot,gtf=gtf.dm3,show_names=T,cluster=5,verbose=0,ex_windows=300)
+@
+
+<<fplots_1_c,echo=TRUE,eval=FALSE>>=
+ngenes<-length(peaks.anno)
+fake.array<-matrix(rnorm(n=ngenes*8,mean=10,sd=2),nrow=ngenes,ncol=8,dimnames=list(paste(rep("Gene",ngenes),1:ngenes),paste("E",1:8,sep="")))
+@
+
+<<label=pTV4_c,echo=TRUE,eval=FALSE>>=
+cluster_results2<-plotTV(fake.array,regions=peaks.anno,show_names=T,gclust="expression",cluster="hc_sp",label_size=0.7,verbose=0)
+@
+
+\subsection{Combining peak profile plots and expression}
+
+For comprehensive visualization of the transcriptional events including transcription factor binding and change of histone modifications and their impact on the transcriptional response, peak profile plots can be combined together with expression data from e.g. RNA-Seq or micro arrays as shown in Fig\ref{fig:4}. \TransView will place the peak profile plots always on the left side and in the order passed to the function. Heat maps of a provided matrix or transcript profile plots are placed on the right side accordingly. 
+
+
+
+\begin{figure}
+\begin{center}
+\includegraphics[keepaspectratio=true]{example_induced_top1k.png}
+\end{center}
+\caption{Mixed profile plot with 5 panels. 1000 ChIP-Seq peaks of basal (1) transcription factor levels and induced (2) levels are shown in the first two panels.  The corresponding RNA-Seq time course is shown on the right side (3 to 5). k-means clustering was applied to partition the RNA-Seq data into 6 clusters. Cluster 1 (red) clearly contains genes with a strong gain in expression levels over time.}
+\label{fig:4}
+\end{figure}
+
+
+Row based clustering can be performed in groups. \Rfunarg{gclust} can be set to ``expression'' or ``peaks'' to restrict the clustering to transcript profile plots or peak profile plots respectively. The group not being clustered will be reordered based on the respective clustering results. \Rfunarg{gclust} can also be set to ``both'' to achieve plot wide clustering. The two options available here for the clustering algorithm are hierarchical clustering and k-means clustering. If hierarchical clustering is chosen, a dendrogram will be displayed on the left of the figure. Since hierarchical clustering in \TransView is performed on the distances within the correlation matrix, a correlation method can be chosen to account for different data distributions. To avoid rows with a standard deviation of zero, the argument \Rfunarg{remove\_lowex} can be used to set a threshold to exclude transcripts that are not expressed which is observed frequently in RNA-Seq data sets with low coverage. If k-means clustering is chosen on the other hand, a colored bar will be displayed on the left side of the figure. Alternatively a vector can be provided with ranks for user defined resorting of the rows. 
+
+
+\newpage
+
+\subsection{Return value and clustering}
+
+As a return value an object of class \Rclass{TVResults} will be returned. This
+object contains the most important parameters and results of a call to \Rfunction{plotTV}.  
+
+<<tplots_1_c,echo=TRUE,eval=TRUE>>=
+cluster_results
+@
+
+To track the clustering performed by plotTV, the order of the peaks and the
+corresponding clusters of each row can be easily accessed.
+
+<<tplots_1_d,echo=TRUE,eval=FALSE,keep.source=TRUE>>=
+cluster_order(cluster_results)[1:10]
+clusters(cluster_results)[1:10]
+summaryTV(cluster_results2)
+@
+
+The order of the individual clusters can also be passed to plotTV in order to
+reproduce a plot clustered with k-means clustering.
+
+<<tplots_1_e,echo=TRUE,eval=FALSE>>=
+plotTV(dens.pas_paired,dens.pas_upaired,regions=genes2plot,gtf=gtf.dm3,show_names=T,rowv=cluster_results,verbose=0,ex_windows=300)
+@
+
+Apart from the basic order of the peaks and genes after clustering and the
+corresponding clusters, a data frame with the summarized scores can be
+extracted.
+
+<<tplots_1_f,echo=TRUE,eval=TRUE>>=
+cluster_df<-plotTVData(cluster_results)
+@
+
+\subsection{Further visualization}
+
+The data frame returned by \Rfunction{plotTVData} contains the averaged scores
+of each data set passed to \Rfunction{plotTV}. The corresponding summaries can be visualized with e.g.
+\Rpackage{ggplot2}:
+
+<<tplots_1_g,eval=FALSE>>=
+ggplot(cluster_df,aes(x=Position,y=Average_scores,color=Sample))+geom_point()+facet_wrap(Plot~Cluster,scales="free",ncol=5)
+@
+
+To visualize individual peaks, \TransView contains the convenience
+function \Rfunction{meltPeak} extracting the normalized read densities from the
+individual experiments. Furthermore the densities are wrapped into a data.frame
+that can be directly passed to \Rpackage{ggplot2}:
+
+<<tplots_1_e,eval=FALSE>>=
+peak1.df<-meltPeak(dens.ind,dens.wt,region=peaks.tss["Peak.1"],peak_windows=100,rpm=F)
+ggplot(peak1.df,aes(x=Position,y=Reads,color=Label))+geom_line(size=2)
+@
+
+Note that \Rfunarg{rpm} is set to FALSE, since the filtered map mass in the toy
+example contains only a small subset of the original map mass. Normalizing to map mass would result in artificailly upscaled densities in the control experiment:
+
+<<tplots_1_e,eval=FALSE>>=
+peak1.df<-meltPeak(dens.ind,dens.wt,region=peaks.tss["Peak.1"],peak_windows=100,rpm=T)
+ggplot(peak1.df,aes(x=Position,y=NormalizedReads,color=Label))+geom_line(size=2)#Wrong!
+@
+
+\newpage
+\section{Memory usage and speed considerations}
+
+
+As the typical mammalian genome comprises of billions of base pairs and each integer in R consumes about 4 bytes, special attention has to be given to memory usage and accession speed. Techniques like Rle can reduce memory consumption of the typical read density map to a minimum. For a large amount of repeated queries however, any form of compression will slow down accession speed. As \TransView is designed to provide fast, genome wide access to memory maps and large memory configurations are becoming the norm, no further attempt to reduce memory consumption is undertaken apart from 16bit integer storage and gap indexing. 
+With a few adjustments however, \TransView can be also run on small configurations such as lap tops:
+
+\begin{itemize}
+  \item{If the regions to be sliced are already known before parsing, with \Rfunarg{set\_filter} the memory storage can be reduced to a minimum.}
+  \item{With the arguments \Rfunarg{paired\_only},\Rfunarg{min\_quality} and \Rfunarg{unique\_only} the amount of gapped regions can be increased and the amount of memory consumption reduced accordingly if applicable.}
+  \item{If the genome wide density maps are not needed anymore, the space occupied by the current R session can be reduced by applying the \Rfunction{rmTV} function.}
+\end{itemize}
+
+The actual space occupied by the read maps largely depends on the coverage and the distribution of the reads. By far the highest consumption is observed with high coverage ChIP-Seq data sets. During the testing phase of this package, for a human genome data set with $1e8$ reads, 1.5GB was observed. For data sets with more pronounced read pile ups like from RNA-Seq, $2e7$ reads were observed to occupy around 300MB on the other hand. 
+The advantage of this approach is that data accession with e.g. \Rfunction{sliceN} is extremely fast. On the test system (Core i5, 4GB ram), fetching $1e5$, 1kbp large regions was completed in less than a second.
+BAM file parsing and read map generation speed on the other hand depend almost linearly on I/O speed and the amount of reads provided. On a Linux configuration, an average of $1e6$ reads per second can be expected.
+
+\newpage
+This vignette was built with the following versions of R and 
+<<sessionInfo>>=
+sessionInfo()
+@
+\bibliographystyle{plain}
+\begin{thebibliography}{}
+\bibitem[Li {\it et al}., 2009]{Li09} Li {\it et al}. (2009) The Sequence alignment/map (SAM) format and SAMtools, {\it Bioinformatics}, {\bf 25}, 2078-9.
+\bibitem[Zhang {\it et al}., 2008]{Zhang08} Zhang {\it et al}. (2008) Model-based Analysis of ChIP-Seq (MACS), {\it Genome Biol}, {\bf vol. 9 (9)}, pp. R137.
+\end{thebibliography}
+
+\end{document}
